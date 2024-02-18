@@ -176,8 +176,7 @@ typedef struct {
 } habcsf_t;
 
 /* Structs read by hw, created by CST, hence packed.
- * Do not poke these unless you know
- * what you're doing.
+ * Do not poke these unless you know what you're doing.
  */
 typedef struct {
 	uint32_t header;
@@ -1123,7 +1122,7 @@ extract_csf(uint8_t *buf, size_t buf_size, size_t *csf_len)
 	}
 	/* Put an artificial limit for input
 	 * at 16M. It's unlikely that the bootloader
-	 * or payload will grow above this.
+	 * or payload IVT offset will grow above this.
 	 */
 	if (buf_size > (16 << 20)) {
 		dbprintf("Could not find IVT. Offset too large.\n");
@@ -1199,10 +1198,7 @@ err_out:
 	return NULL;
 }
 
-/* Nothing advanced, just mmap file,
- * populate it so we don't have any
- * pagefaulting in process.
- */
+/* Nothing advanced, just mmap file */
 static int
 mmap_file(char *file, size_t len, uint8_t **mem, size_t *size)
 {
@@ -1232,8 +1228,7 @@ mmap_file(char *file, size_t len, uint8_t **mem, size_t *size)
 		}
 		len = st.st_size;
 	}
-	buf = mmap(NULL, len, PROT_READ,
-		   MAP_SHARED | MAP_POPULATE, fd, 0);
+	buf = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
 	if (buf == MAP_FAILED) {
 		dbprintf("Could not mmap file.\n");
 		goto err_out;
@@ -1565,7 +1560,7 @@ check_input_srkhash(char *buf)
 	/* Only hexadecimal digits */
 	for (i = 0; i < SHA256_HEX_STR_LEN; i++) {
 		if (!isxdigit(buf[i])) {
-			dbprintf("srkhash str contains invalid character.\n");
+			dbprintf("srkhash contains invalid characters.\n");
 			goto err_out;
 		}
 	}
@@ -1724,7 +1719,7 @@ out:
 	return 1;
 }
 
-/* Input: barebox with hab csf and superrootkeyhash from fuses.
+/* Input: Payload with hab csf and superrootkeyhash from fuses.
  * Checks superrootkey hash string.
  * Extracts CSF.
  * Parses/Validates CSF.
@@ -1754,14 +1749,13 @@ main(int argc, char *argv[])
 	fprintf(stderr, "-----------------------------------------------\n");
 
 	if (argc != 3) {
-		fprintf(stderr, "Usage: %s \n", argv[0]);
-		fprintf(stderr, "<BAREBOX FILE> <SHA256 SRK-HASH ASCII>\n");
+		fprintf(stderr, "Usage:\n");
+		fprintf(stderr, "<BOOTLOADER> <SHA256 SRK-HASH ASCII>\n");
 		fprintf(stderr, "[env: DEBUG_VALIDATION for debug]\n");
 		goto err_out;
 	}
 	/* Set debug printouts if we find the env variable.
-	 * We could use options, but want the same syntax
-	 * as for the other validators.
+	 * We could use options instead.
 	 */
 	if (getenv("DEBUG_VALIDATION")) {
 		debug = 1;

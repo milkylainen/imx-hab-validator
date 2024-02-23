@@ -272,6 +272,14 @@ typedef struct {
 	uint8_t nonce_mac[];
 } __attribute__((packed)) csf_sec_mac_t;
 
+/* Non CSF struct for pointing to super root key table keys */
+typedef struct {
+	uint8_t tag;
+	uint16_t len;
+	uint8_t version;
+	uint8_t key[];
+} __attribute__((packed)) csf_srktable_key_t;
+
 /* Internal list handling */
 typedef struct {
 	uint8_t *buf;
@@ -1283,28 +1291,29 @@ err_out:
 	return 0;
 }
 
-/* Calculate the srktable hash.
- * Nothing fancy, takes a blob (in this case the srktable)
+/* Calculate the hash.
+ * Nothing fancy, takes a blob
  * and calculates a sha256 hash from it.
- * This is then converted to ascii and compared with
- * the incoming srktable hash.
+ * Allocated buffer needs to be freed by caller.
  */
-static int
-calc_srktable_hash(uint8_t *srktable, size_t srktable_len,
-		   uint8_t *hash, size_t *hashlen)
+static uint8_t *
+calc_hash(uint8_t *buf, size_t buf_len, size_t *hashlen)
 {
+	uint8_t *hash_buf;
+	unsigned int hash_buf_len;
 	const EVP_MD *type;
 	EVP_MD_CTX *ctx;
 
-	if (!srktable || !srktable_len || !hash || !hashlen) {
+	ctx = NULL;
+	hash_buf = NULL;
+	if (!buf || !buf_len || !hashlen) {
 		dbprintf("Invalid function parameters.\n");
 		goto err_out;
 	}
-	if (*hashlen < SHA256_DIGEST_LENGTH) {
-		dbprintf("Invalid sha256 hashlen.\n");
+	if (!(hash_buf = (uint8_t *)malloc(EVP_MAX_MD_SIZE))) {
+		dbprintf("Can't malloc digest storage for sha256.\n");
 		goto err_out;
 	}
-
 	if (!(type = EVP_get_digestbyname("sha256"))) {
 		dbprintf("Can't use digest sha256.\n");
 		goto err_out;
@@ -1314,24 +1323,26 @@ calc_srktable_hash(uint8_t *srktable, size_t srktable_len,
 		dbprintf("Can't use digest sha256.\n");
 		goto err_out;
 	}
-	if (!EVP_DigestUpdate(ctx, srktable, srktable_len)) {
+	if (!EVP_DigestUpdate(ctx, buf, buf_len)) {
 		dbprintf("Can't use digest sha256.\n");
 		goto err_out;
 	}
-	EVP_DigestFinal(ctx, hash, (unsigned int *)hashlen);
-	EVP_MD_CTX_free(ctx);
+	EVP_DigestFinal(ctx, hash_buf, &hash_buf_len);
+	*hashlen = hash_buf_len;
 
-	return 1;
+	if (ctx) EVP_MD_CTX_free(ctx);
+	return hash_buf;
 
 err_out:
-	return 0;
+	if (ctx) EVP_MD_CTX_free(ctx);
+	return NULL;
 }
 
 /* Used in conjunction with the srktable hash calculation.
  * Converts a string to an ascii string.
  * In this case the binary hash to ascii.
  */
-static void
+static int
 hash_to_sha_str(uint8_t *hash, size_t hashlen,
 		char *buf, size_t buflen)
 {
@@ -1350,8 +1361,10 @@ hash_to_sha_str(uint8_t *hash, size_t hashlen,
 		sprintf(buf + i * 2, "%02x", hash[i]);
 	}
 
+	return 1;
+
 err_out:
-	return;
+	return 0;
 }
 
 /* Used by the validation process.
@@ -1581,43 +1594,85 @@ static listtype_t *
 verify_srktable(char *srktable_in)
 {
 	listtype_t *esrkt;
+	csf_srktable_key_t *key;
 	char srktable_ascii[SHA256_HEX_STR_LEN + 1];
-	uint8_t *srktable_hash;
-	size_t srktable_hash_len;
+	uint8_t *hash, *srkeys_hash;
+	size_t hashlen, curr, srkeys_hash_len;
 
+	hash = NULL;
+	srkeys_hash = NULL;
 	if (!srktable_in || !srktable_in[0]) {
 		dbprintf("Invalid function parameters.\n");
 		goto err_out;
 	}
-
-	srktable_hash_len = EVP_MAX_MD_SIZE;
-	if (!(srktable_hash = malloc(srktable_hash_len))) {
-		dbprintf("Could not allocate memory for srktable hash.\n");
+	/* All keys hash.
+	 * HABv4 is hash(hash(key1) + hash(keyn ))
+	 * AHAB is just hash(keyblobs)
+	 */
+	srkeys_hash_len = EVP_MAX_MD_SIZE * 4;
+	if (!(srkeys_hash = malloc(srkeys_hash_len))) {
+		dbprintf("Could not allocate memory for srkeys hashes.\n");
 		goto err_out;
 	}
-	memset(srktable_hash, 0, srktable_hash_len);
-	/* Get first entry of srktablelist */
+	memset(srkeys_hash, 0, srkeys_hash_len);
+	/* Get first entry of srktablelist.
+	 * This data must be stripped of the srktable header already.
+	 * Reuse srkeys_hash_len to declare length of concatd. hashes.
+	 */
 	esrkt = list_entry((&srktablelist)->next, typeof(*esrkt), list);
-	/* Modifies srktable_hash_len */
-	if (!calc_srktable_hash(esrkt->buf, esrkt->buflen,
-				srktable_hash, &srktable_hash_len)) {
+	srkeys_hash_len = 0;
+	for (curr = 0; curr < esrkt->buflen;) {
+		key = (csf_srktable_key_t *)&(esrkt->buf[curr]);
+		if (key->tag != HAB_KEY_PUBLIC) {
+			dbprintf("srktable key is not declared public.\n");
+			goto err_out;
+		}
+		/* Hashes are calculated including key headers */
+		hash = calc_hash((uint8_t *)key, HAB_HDR_LEN(key), &hashlen);
+		if (!hash) {
+			dbprintf("Could not calculate a srkey hash.\n");
+			goto err_out;
+		}
+		if (hashlen != SHA256_DIGEST_LENGTH) {
+			dbprintf("Invalid srkey hash length.\n");
+			goto err_out;
+		}
+		memcpy(&srkeys_hash[srkeys_hash_len], hash, hashlen);
+		free(hash);
+		hash = NULL;
+		/* Increment input data offset and the srkeys hash data offset. */
+		curr += HAB_HDR_LEN(key);
+		srkeys_hash_len += hashlen;
+	}
+	/* Calc final table hash from key hashes. */
+	hash = calc_hash(srkeys_hash, srkeys_hash_len, &hashlen);
+	if (!hash) {
 		dbprintf("Could not calculate srktable hash.\n");
 		goto err_out;
 	}
 	memset(srktable_ascii, 0, sizeof(srktable_ascii));
-	hash_to_sha_str(srktable_hash, srktable_hash_len,
-			srktable_ascii, sizeof(srktable_ascii));
+	if (!hash_to_sha_str(hash, hashlen,
+			     srktable_ascii, sizeof(srktable_ascii))) {
+		dbprintf("Could not convert srktable bin to ascii.\n");
+		goto err_out;
+	}
+	free(hash);
+	hash = NULL;
 	if (strncasecmp(srktable_ascii, srktable_in,
 			SHA256_HEX_STR_LEN)) {
 		dbprintf("srktable hash in file doesn't match input.\n");
 		goto err_out;
 	}
-	dbprintf("SRKTable SHA256 Digest: %s\n",
-		 srktable_ascii);
+	dbprintf("SRKTable input SHA256 digest ascii: %s\n", srktable_in);
+	dbprintf("SRKTable calcd SHA256 digest ascii: %s\n", srktable_ascii);
 
+	if (hash) free(hash);
+	if (srkeys_hash) free(srkeys_hash);
 	return esrkt;
 
 err_out:
+	if (hash) free(hash);
+	if (srkeys_hash) free(srkeys_hash);
 	return NULL;
 }
 

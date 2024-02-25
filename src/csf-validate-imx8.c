@@ -1319,6 +1319,10 @@ calc_hash(uint8_t *buf, size_t buf_len, size_t *hashlen)
 		goto err_out;
 	}
 	ctx = EVP_MD_CTX_new();
+	if (!ctx) {
+		dbprintf("Can't allocate md ctx.\n");
+		goto err_out;
+	}
 	if (!EVP_DigestInit(ctx, type)) {
 		dbprintf("Can't use digest sha256.\n");
 		goto err_out;
@@ -1335,6 +1339,7 @@ calc_hash(uint8_t *buf, size_t buf_len, size_t *hashlen)
 
 err_out:
 	if (ctx) EVP_MD_CTX_free(ctx);
+	if (hash_buf) free(hash_buf);
 	return NULL;
 }
 
@@ -1656,8 +1661,6 @@ verify_srktable(char *srktable_in)
 		dbprintf("Could not convert srktable bin to ascii.\n");
 		goto err_out;
 	}
-	free(hash);
-	hash = NULL;
 	if (strncasecmp(srktable_ascii, srktable_in,
 			SHA256_HEX_STR_LEN)) {
 		dbprintf("srktable hash in file doesn't match input.\n");
